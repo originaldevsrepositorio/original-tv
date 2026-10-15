@@ -1,6 +1,5 @@
 package br.com.originalmeathouse.player;
 
-import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.graphics.Color;
 import android.os.Bundle;
@@ -12,38 +11,36 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
-import android.webkit.CookieManager;
-import android.webkit.RenderProcessGoneDetail;
-import android.webkit.WebChromeClient;
-import android.webkit.WebResourceError;
-import android.webkit.WebResourceRequest;
-import android.webkit.WebResourceResponse;
-import android.webkit.WebSettings;
-import android.webkit.WebView;
-import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 
+import org.mozilla.geckoview.GeckoResult;
+import org.mozilla.geckoview.GeckoRuntime;
+import org.mozilla.geckoview.GeckoRuntimeSettings;
+import org.mozilla.geckoview.GeckoSession;
+import org.mozilla.geckoview.GeckoSessionSettings;
+import org.mozilla.geckoview.GeckoView;
+import org.mozilla.geckoview.WebRequestError;
+
 /**
- * Player de TV indoor do Original.
+ * Player de TV indoor do Original (motor GeckoView embutido).
  *
- * Abre o player em tela cheia, sem barras, sem zoom, com tela sempre ligada, autoplay de vídeo/áudio,
- * dados salvos entre aberturas e reconexão automática quando a internet cai.
+ * Tela cheia, sem barras, tela sempre ligada, autoplay, dados salvos entre aberturas
+ * e reconexão automática quando a internet cai.
  *
- * Atalhos do controle remoto:
+ * Controle remoto:
  *  - MENU: recarrega o player
  *  - VOLTAR 5x em 3 segundos: fecha o app (manutenção)
  */
 public class MainActivity extends Activity {
 
     private static final String PLAYER_URL = BuildConfig.PLAYER_URL;
-
-    /** Intervalo para tentar de novo quando a página não carrega. */
     private static final long RETRY_DELAY_MS = 10_000L;
-    /** Recarga preventiva do player (evita acúmulo de memória em operação 24h). */
     private static final long PERIODIC_RELOAD_MS = 6L * 60 * 60 * 1000;
     private static final int EXIT_PRESSES = 5;
     private static final long EXIT_WINDOW_MS = 3_000L;
+
+    private static GeckoRuntime runtime; // um único motor por processo
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable retryRunnable = this::loadPlayer;
@@ -56,12 +53,9 @@ public class MainActivity extends Activity {
     };
 
     private FrameLayout root;
-    private WebView webView;
+    private GeckoView geckoView;
+    private GeckoSession session;
     private TextView offlineView;
-    private View customView;
-    private WebChromeClient.CustomViewCallback customViewCallback;
-
-    private WebChromeClient chromeClient;
     private boolean retryPending = false;
 
     private int backPresses = 0;
@@ -75,7 +69,18 @@ public class MainActivity extends Activity {
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.parseColor("#0b0a09"));
 
-        createWebView();
+        if (runtime == null) {
+            GeckoRuntimeSettings settings = new GeckoRuntimeSettings.Builder()
+                    .javaCrashReportingEnabled(false)
+                    .build();
+            runtime = GeckoRuntime.create(getApplicationContext(), settings);
+            // vídeo e áudio tocam sozinhos
+            runtime.getSettings().setAutoplayDefault(GeckoRuntimeSettings.AUTOPLAY_DEFAULT_ALLOWED);
+        }
+
+        geckoView = new GeckoView(this);
+        root.addView(geckoView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         offlineView = new TextView(this);
         offlineView.setText(R.string.offline_message);
@@ -90,51 +95,66 @@ public class MainActivity extends Activity {
         setContentView(root);
         hideSystemUi();
 
+        openSession();
         loadPlayer();
         handler.postDelayed(periodicReload, PERIODIC_RELOAD_MS);
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
-    private void createWebView() {
-        webView = new WebView(this);
-        webView.setBackgroundColor(Color.parseColor("#0b0a09"));
-        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+    private void openSession() {
+        GeckoSessionSettings sessionSettings = new GeckoSessionSettings.Builder()
+                .usePrivateMode(false)
+                .build();
+        session = new GeckoSession(sessionSettings);
 
-        WebSettings s = webView.getSettings();
-        s.setJavaScriptEnabled(true);
-        s.setDomStorageEnabled(true);          // localStorage: a configuração do player fica salva
-        s.setDatabaseEnabled(true);
-        s.setMediaPlaybackRequiresUserGesture(false); // vídeo/áudio tocam sozinhos
-        s.setSupportZoom(false);
-        s.setBuiltInZoomControls(false);
-        s.setDisplayZoomControls(false);
-        s.setTextZoom(100);                    // ignora fonte ampliada do sistema
-        s.setUseWideViewPort(true);
-        s.setLoadWithOverviewMode(true);
-        s.setCacheMode(WebSettings.LOAD_DEFAULT);
-        s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
-        s.setAllowFileAccess(false);
-        // Identifica o app para o player (ex.: a página pode checar "OriginalTV" no user agent)
-        s.setUserAgentString(s.getUserAgentString() + " OriginalTV/" + BuildConfig.VERSION_NAME);
+        session.setNavigationDelegate(new GeckoSession.NavigationDelegate() {
+            @Override
+            public GeckoResult<String> onLoadError(GeckoSession s, String uri, WebRequestError error) {
+                showOfflineAndRetry();
+                return null;
+            }
+        });
 
-        WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
+        session.setProgressDelegate(new GeckoSession.ProgressDelegate() {
+            @Override
+            public void onPageStop(GeckoSession s, boolean success) {
+                if (success && !retryPending) {
+                    offlineView.setVisibility(View.GONE);
+                }
+            }
+        });
 
-        CookieManager cookies = CookieManager.getInstance();
-        cookies.setAcceptCookie(true);
-        cookies.setAcceptThirdPartyCookies(webView, true);
+        session.setContentDelegate(new GeckoSession.ContentDelegate() {
+            @Override
+            public void onCrash(GeckoSession s) {
+                recreateSession();
+            }
 
-        webView.setWebViewClient(new PlayerClient());
-        chromeClient = new PlayerChromeClient();
-        webView.setWebChromeClient(chromeClient);
+            @Override
+            public void onKill(GeckoSession s) {
+                recreateSession();
+            }
+        });
 
-        root.addView(webView, 0, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        session.open(runtime);
+        geckoView.setSession(session);
+    }
+
+    private void recreateSession() {
+        handler.post(() -> {
+            try {
+                geckoView.releaseSession();
+                session.close();
+            } catch (Exception ignored) {
+            }
+            openSession();
+            loadPlayer();
+        });
     }
 
     private void loadPlayer() {
         handler.removeCallbacks(retryRunnable);
         retryPending = false;
-        webView.loadUrl(PLAYER_URL);
+        session.loadUri(PLAYER_URL);
     }
 
     private void showOfflineAndRetry() {
@@ -142,78 +162,6 @@ public class MainActivity extends Activity {
         offlineView.setVisibility(View.VISIBLE);
         handler.removeCallbacks(retryRunnable);
         handler.postDelayed(retryRunnable, RETRY_DELAY_MS);
-    }
-
-    private class PlayerClient extends WebViewClient {
-        @Override
-        public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
-            // mantém o aviso até a página terminar de carregar com sucesso
-        }
-
-        @Override
-        public void onPageFinished(WebView view, String url) {
-            if (!retryPending) {
-                offlineView.setVisibility(View.GONE);
-            }
-        }
-
-        @Override
-        public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-            if (request.isForMainFrame()) {
-                showOfflineAndRetry();
-            }
-        }
-
-        @Override
-        @SuppressWarnings("deprecation")
-        public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
-            // Android 5.x e 6.x (API < 23) usam esta assinatura antiga
-            if (android.os.Build.VERSION.SDK_INT < 23 && PLAYER_URL.equals(failingUrl)) {
-                showOfflineAndRetry();
-            }
-        }
-
-        @Override
-        public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse errorResponse) {
-            if (request.isForMainFrame() && errorResponse.getStatusCode() >= 500) {
-                showOfflineAndRetry();
-            }
-        }
-
-        @Override
-        public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
-            // O processo do WebView caiu (pouca memória, por ex.): recria e recarrega.
-            root.removeView(webView);
-            webView.destroy();
-            createWebView();
-            loadPlayer();
-            return true;
-        }
-    }
-
-    private class PlayerChromeClient extends WebChromeClient {
-        @Override
-        public void onShowCustomView(View view, CustomViewCallback callback) {
-            if (customView != null) {
-                callback.onCustomViewHidden();
-                return;
-            }
-            customView = view;
-            customViewCallback = callback;
-            webView.setVisibility(View.GONE);
-            root.addView(view, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        }
-
-        @Override
-        public void onHideCustomView() {
-            if (customView == null) return;
-            root.removeView(customView);
-            customView = null;
-            if (customViewCallback != null) customViewCallback.onCustomViewHidden();
-            customViewCallback = null;
-            webView.setVisibility(View.VISIBLE);
-        }
     }
 
     @SuppressWarnings("deprecation")
@@ -234,49 +182,42 @@ public class MainActivity extends Activity {
     }
 
     @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if (keyCode == KeyEvent.KEYCODE_BACK) {
-            if (customView != null) {
-                chromeClient.onHideCustomView();
-                return true;
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        // Trata VOLTAR e MENU antes do GeckoView, que poderia consumi-los
+        int code = event.getKeyCode();
+        if (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_MENU) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+                if (code == KeyEvent.KEYCODE_MENU) {
+                    loadPlayer();
+                } else {
+                    long now = SystemClock.elapsedRealtime();
+                    if (now - firstBackAt > EXIT_WINDOW_MS) {
+                        firstBackAt = now;
+                        backPresses = 0;
+                    }
+                    backPresses++;
+                    if (backPresses >= EXIT_PRESSES) finish();
+                }
             }
-            long now = SystemClock.elapsedRealtime();
-            if (now - firstBackAt > EXIT_WINDOW_MS) {
-                firstBackAt = now;
-                backPresses = 0;
-            }
-            backPresses++;
-            if (backPresses >= EXIT_PRESSES) {
-                finish();
-            }
-            return true; // bloqueia o "voltar" normal: o player não fecha sem querer
-        }
-        if (keyCode == KeyEvent.KEYCODE_MENU) {
-            loadPlayer();
             return true;
         }
-        return super.onKeyDown(keyCode, event);
+        return super.dispatchKeyEvent(event);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        webView.onResume();
         hideSystemUi();
-    }
-
-    @Override
-    protected void onPause() {
-        super.onPause();
-        CookieManager.getInstance().flush();
-        webView.onPause();
     }
 
     @Override
     protected void onDestroy() {
         handler.removeCallbacksAndMessages(null);
-        root.removeAllViews();
-        webView.destroy();
+        try {
+            geckoView.releaseSession();
+            session.close();
+        } catch (Exception ignored) {
+        }
         super.onDestroy();
     }
 }
