@@ -10,8 +10,11 @@ android {
         applicationId 'br.com.originalmeathouse.player'
         minSdk 21          // Android 5.0+ (cobre a maioria dos TV box)
         targetSdk 34
-        versionCode 1
-        versionName '1.0.0'
+        versionName '1.1.0'
+        versionCode 2
+
+        // TV box usam ARM (32 ou 64 bits); evita embutir x86 e reduz o tamanho do APK
+        ndk { abiFilters 'armeabi-v7a', 'arm64-v8a' }
 
         // Endereço do player carregado pelo app. Para trocar, altere aqui e gere o APK de novo.
         buildConfigField 'String', 'PLAYER_URL', '"https://player.originalmeathouse.com.br"'
@@ -33,4 +36,9 @@ android {
             signingConfig signingConfigs.debug
         }
     }
+}
+
+dependencies {
+    // Motor de navegador (Firefox) embutido no app: não depende do WebView antigo do TV box.
+    implementation 'org.mozilla.geckoview:geckoview-omni:[128.0,129.0)'
 }
