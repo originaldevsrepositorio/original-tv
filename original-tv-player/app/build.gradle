@@ -1,0 +1,36 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'br.com.originalmeathouse.player'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'br.com.originalmeathouse.player'
+        minSdk 21          // Android 5.0+ (cobre a maioria dos TV box)
+        targetSdk 34
+        versionCode 1
+        versionName '1.0.0'
+
+        // Endereço do player carregado pelo app. Para trocar, altere aqui e gere o APK de novo.
+        buildConfigField 'String', 'PLAYER_URL', '"https://player.originalmeathouse.com.br"'
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // Assinado com a chave de debug: suficiente para instalar direto no TV box (sideload).
+            signingConfig signingConfigs.debug
+        }
+    }
+}
