@@ -70,12 +70,19 @@ public class MainActivity extends Activity {
         root.setBackgroundColor(Color.parseColor("#0b0a09"));
 
         if (runtime == null) {
-            GeckoRuntimeSettings settings = new GeckoRuntimeSettings.Builder()
-                    .javaCrashReportingEnabled(false)
-                    .build();
-            runtime = GeckoRuntime.create(getApplicationContext(), settings);
-            // vídeo e áudio tocam sozinhos
-            runtime.getSettings().setAutoplayDefault(GeckoRuntimeSettings.AUTOPLAY_DEFAULT_ALLOWED);
+            // Preferências do motor: vídeo e áudio tocam sozinhos (sem toque do usuário)
+            String configPath = null;
+            try {
+                java.io.File cfg = new java.io.File(getFilesDir(), "geckoview-config.yaml");
+                java.io.FileWriter w = new java.io.FileWriter(cfg, false);
+                w.write("prefs:\n  media.autoplay.default: 0\n  media.autoplay.blocking_policy: 0\n");
+                w.close();
+                configPath = cfg.getAbsolutePath();
+            } catch (java.io.IOException ignored) {
+            }
+            GeckoRuntimeSettings.Builder builder = new GeckoRuntimeSettings.Builder();
+            if (configPath != null) builder.configFilePath(configPath);
+            runtime = GeckoRuntime.create(getApplicationContext(), builder.build());
         }
 
         geckoView = new GeckoView(this);
